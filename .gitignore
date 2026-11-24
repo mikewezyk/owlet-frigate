@@ -1,0 +1,8 @@
+/target/
+**/target/
+.env
+.env.*
+!.env.example
+__pycache__/
+.DS_Store
+*.h264
