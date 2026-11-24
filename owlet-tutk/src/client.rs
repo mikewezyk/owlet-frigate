@@ -226,7 +226,12 @@ pub fn stream(socket: Arc<dyn Datagram>, cfg: &Config, out: &mut dyn Write) -> i
     let mut due = streaming;
     let mut sent = false;
     let mut started = false;
+    let mut last_frame = Instant::now();
     loop {
+        // Exit so that the supervisor reconnects. A frozen picture must not look live.
+        if started && last_frame.elapsed() >= cfg.stall {
+            return Err(timeout("no video from the camera"));
+        }
         if !started && streaming.elapsed() >= cfg.timeout {
             return Err(timeout("start IOCtrl ACK timeout (-20011)"));
         }
@@ -279,7 +284,10 @@ pub fn stream(socket: Arc<dyn Datagram>, cfg: &Config, out: &mut dyn Write) -> i
             }
         }
         if Ack::acknowledges(&b, end_io) {
-            started = true;
+            if !started {
+                started = true;
+                last_frame = Instant::now();
+            }
             continue;
         }
         let Some(f) = Fragment::parse(&b) else {
@@ -298,11 +306,13 @@ pub fn stream(socket: Arc<dyn Datagram>, cfg: &Config, out: &mut dyn Write) -> i
             new_media = true;
             ack.observe(f.number);
             if let Some(frame) = frames.accept(f) {
+                last_frame = Instant::now();
                 out.write_all(&frame)?;
             }
         }
         if resend {
             while let Some(next) = frames.pop_ready() {
+                last_frame = Instant::now();
                 out.write_all(&next)?;
             }
             frames.check_receive_window()?;

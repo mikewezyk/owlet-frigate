@@ -81,9 +81,14 @@ pub enum Security {
 
 // B_dispatch 6.7: device bind port was not traced. Use the observed LAN destination.
 pub const LAN_PORT: u16 = 32761;
-// C_session_dtls 5.3, 5.5: the application cipher list and timeout are unknown.
-pub const DEFAULT_CIPHER_LIST: &str = "DEFAULT:@SECLEVEL=0";
+/// Only suites that authenticate with the pre-shared key. The key comes from the camera
+/// password, so the handshake proves the peer is the camera. A suite that authenticates with
+/// a certificate proves nothing: the camera has no certificate that a client can check.
+/// SECLEVEL=1 keeps the CBC suites that older cameras can need.
+pub const DEFAULT_CIPHER_LIST: &str = "aPSK:!aNULL:!eNULL:!CAMELLIA:!ARIA:@SECLEVEL=1";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// The session can stay up while the video stops. Give up after this time without a frame.
+pub const DEFAULT_STALL: Duration = Duration::from_secs(20);
 // D_av 8.12: the start command body belongs to the camera application.
 pub const DEFAULT_START: (u32, [u8; 8]) = (0x01ff, [0; 8]);
 #[derive(Clone)]
@@ -98,6 +103,7 @@ pub struct Config {
     pub security: Security,
     pub cipher_list: String,
     pub timeout: Duration,
+    pub stall: Duration,
     pub duration: Option<Duration>,
     pub start: (u32, Vec<u8>),
     pub trace: bool,
@@ -116,9 +122,10 @@ impl Default for Config {
             password: String::new(),
             auth_key: None,
             key_mask: transcode::DEFAULT_MASK,
-            security: Security::Simple,
+            security: Security::Dtls,
             cipher_list: DEFAULT_CIPHER_LIST.into(),
             timeout: DEFAULT_TIMEOUT,
+            stall: DEFAULT_STALL,
             duration: None,
             start: (DEFAULT_START.0, DEFAULT_START.1.to_vec()),
             trace: false,

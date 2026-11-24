@@ -6,7 +6,8 @@ use crate::{
     timeout, Config,
 };
 use openssl::ssl::{
-    ErrorCode, Ssl, SslContextBuilder, SslMethod, SslOptions, SslStream, SslVersion,
+    ErrorCode, Ssl, SslContextBuilder, SslMethod, SslOptions, SslRef, SslStream, SslVerifyMode,
+    SslVersion,
 };
 use std::{
     io::{self, Read, Write},
@@ -78,6 +79,59 @@ impl Write for Records<'_> {
         Ok(())
     }
 }
+/// Builds the TLS settings for one side of the channel.
+fn context(cfg: &Config, role: Role) -> io::Result<SslContextBuilder> {
+    let mut ctx = SslContextBuilder::new(DTLS_METHOD()).map_err(io::Error::other)?;
+    ctx.set_min_proto_version(Some(MAX_DTLS_VERSION))
+        .map_err(io::Error::other)?;
+    ctx.set_max_proto_version(Some(MAX_DTLS_VERSION))
+        .map_err(io::Error::other)?;
+    // Defence in depth. PSK suites carry no certificate, so this changes nothing for the
+    // camera. If a cipher list ever lets a certificate suite in, it fails here: no CA is
+    // trusted. OpenSSL clients verify nothing unless they are told to.
+    ctx.set_verify(SslVerifyMode::PEER);
+    ctx.set_options(SslOptions::NO_QUERY_MTU);
+    if cfg.cipher_list.as_bytes().contains(&0) {
+        return Err(invalid("invalid cipher list"));
+    }
+    ctx.set_cipher_list(&cfg.cipher_list)
+        .map_err(io::Error::other)?;
+    let identity = format!("AUTHPWD_{}", cfg.account).into_bytes();
+    let key = password_psk(&cfg.password);
+    if role == Role::Client {
+        // C_session_dtls 5.4: the callback ignores the unknown identity hint.
+        ctx.set_psk_client_callback(move |_, _, id, out| {
+            if id.len() <= identity.len() || out.len() < key.len() {
+                return Ok(0);
+            }
+            id[..identity.len()].copy_from_slice(&identity);
+            id[identity.len()] = 0;
+            out[..32].copy_from_slice(&key);
+            Ok(32)
+        });
+    } else {
+        ctx.set_psk_server_callback(move |_, id, out| {
+            if id != Some(identity.as_slice()) || out.len() < 32 {
+                return Ok(0);
+            }
+            out[..32].copy_from_slice(&key);
+            Ok(32)
+        });
+    }
+    Ok(ctx)
+}
+/// Refuses a finished handshake that the pre-shared key did not authenticate.
+fn require_psk(ssl: &SslRef) -> io::Result<()> {
+    match ssl.current_cipher() {
+        Some(c) if is_psk(c.name()) => Ok(()),
+        _ => Err(invalid("peer did not prove that it knows the password")),
+    }
+}
+fn is_psk(cipher: &str) -> bool {
+    ["PSK-", "DHE-PSK-", "ECDHE-PSK-"]
+        .iter()
+        .any(|prefix| cipher.starts_with(prefix))
+}
 pub(crate) struct Secure<'a>(SslStream<Records<'a>>);
 impl<'a> Secure<'a> {
     pub fn open(session: &'a Session, cfg: &Config) -> io::Result<Self> {
@@ -88,37 +142,7 @@ impl<'a> Secure<'a> {
         {
             return Err(invalid("invalid DTLS credential length (-20024)"));
         }
-        let mut ctx = SslContextBuilder::new(DTLS_METHOD()).map_err(io::Error::other)?;
-        ctx.set_max_proto_version(Some(MAX_DTLS_VERSION))
-            .map_err(io::Error::other)?;
-        ctx.set_options(SslOptions::NO_QUERY_MTU);
-        if cfg.cipher_list.as_bytes().contains(&0) {
-            return Err(invalid("invalid cipher list"));
-        }
-        ctx.set_cipher_list(&cfg.cipher_list)
-            .map_err(io::Error::other)?;
-        let identity = format!("AUTHPWD_{}", cfg.account).into_bytes();
-        let key = password_psk(&cfg.password);
-        if session.role == Role::Client {
-            // C_session_dtls 5.4: the callback ignores the unknown identity hint.
-            ctx.set_psk_client_callback(move |_, _, id, out| {
-                if id.len() <= identity.len() || out.len() < key.len() {
-                    return Ok(0);
-                }
-                id[..identity.len()].copy_from_slice(&identity);
-                id[identity.len()] = 0;
-                out[..32].copy_from_slice(&key);
-                Ok(32)
-            });
-        } else {
-            ctx.set_psk_server_callback(move |_, id, out| {
-                if id != Some(identity.as_slice()) || out.len() < 32 {
-                    return Ok(0);
-                }
-                out[..32].copy_from_slice(&key);
-                Ok(32)
-            });
-        }
+        let ctx = context(cfg, session.role)?;
         let mut ssl = Ssl::new(&ctx.build()).map_err(io::Error::other)?;
         ssl.set_mtu(MTU as u32).map_err(io::Error::other)?;
         let mut stream = SslStream::new(
@@ -138,7 +162,10 @@ impl<'a> Secure<'a> {
                 stream.accept()
             };
             match result {
-                Ok(()) => return Ok(Self(stream)),
+                Ok(()) => {
+                    require_psk(stream.ssl())?;
+                    return Ok(Self(stream));
+                }
                 Err(_) if stream.get_ref().plain_peer => {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
@@ -197,5 +224,133 @@ impl<'a> Secure<'a> {
             }
             Err(e) => Err(e.into_io_error().unwrap_or_else(io::Error::other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! An impostor on the LAN has the camera's address but not its password.
+    use super::*;
+    use openssl::{
+        asn1::Asn1Time,
+        hash::MessageDigest,
+        pkey::PKey,
+        rsa::Rsa,
+        x509::{X509Name, X509},
+    };
+    use std::{net::UdpSocket, thread, time::Duration};
+
+    /// A connected UDP socket is the datagram transport for these handshakes.
+    struct Udp(UdpSocket);
+    impl Read for Udp {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            self.0.recv(out)
+        }
+    }
+    impl Write for Udp {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.send(bytes)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    fn pair() -> (Udp, Udp) {
+        let a = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let b = UdpSocket::bind("127.0.0.1:0").unwrap();
+        a.connect(b.local_addr().unwrap()).unwrap();
+        b.connect(a.local_addr().unwrap()).unwrap();
+        for s in [&a, &b] {
+            s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        }
+        (Udp(a), Udp(b))
+    }
+    /// The impostor: a self-signed certificate and no pre-shared key.
+    fn impostor() -> SslContextBuilder {
+        let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
+        let mut name = X509Name::builder().unwrap();
+        name.append_entry_by_text("CN", "impostor").unwrap();
+        let name = name.build();
+        let mut cert = X509::builder().unwrap();
+        cert.set_version(2).unwrap();
+        cert.set_subject_name(&name).unwrap();
+        cert.set_issuer_name(&name).unwrap();
+        cert.set_pubkey(&key).unwrap();
+        cert.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        cert.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        cert.sign(&key, MessageDigest::sha256()).unwrap();
+        let mut ctx = SslContextBuilder::new(DTLS_METHOD()).unwrap();
+        ctx.set_max_proto_version(Some(MAX_DTLS_VERSION)).unwrap();
+        ctx.set_cipher_list("ALL:@SECLEVEL=0").unwrap();
+        ctx.set_certificate(&cert.build()).unwrap();
+        ctx.set_private_key(&key).unwrap();
+        ctx
+    }
+    /// Returns the cipher the client accepted.
+    fn handshake(client: SslContextBuilder, server: SslContextBuilder) -> Option<String> {
+        let (a, b) = pair();
+        let server = thread::spawn(move || {
+            let mut ssl = Ssl::new(&server.build()).unwrap();
+            ssl.set_mtu(MTU as u32).unwrap();
+            let _ = SslStream::new(ssl, b).unwrap().accept();
+        });
+        let mut ssl = Ssl::new(&client.build()).unwrap();
+        ssl.set_mtu(MTU as u32).unwrap();
+        let mut stream = SslStream::new(ssl, a).unwrap();
+        let done = stream.connect().is_ok();
+        server.join().unwrap();
+        done.then(|| stream.ssl().current_cipher().unwrap().name().to_owned())
+    }
+    /// The settings before this fork: any cipher and no verification.
+    fn upstream_client() -> SslContextBuilder {
+        let mut ctx = SslContextBuilder::new(DTLS_METHOD()).unwrap();
+        ctx.set_max_proto_version(Some(MAX_DTLS_VERSION)).unwrap();
+        ctx.set_cipher_list("DEFAULT:@SECLEVEL=0").unwrap();
+        ctx
+    }
+    fn config() -> Config {
+        Config {
+            password: "test-camera-password".into(),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn impostor_without_the_password_is_rejected() {
+        let client = context(&config(), Role::Client).unwrap();
+        assert_eq!(handshake(client, impostor()), None);
+    }
+    /// Proves that the impostor in these tests is a real threat and not a broken server.
+    #[test]
+    fn impostor_is_accepted_by_the_old_settings() {
+        let cipher = handshake(upstream_client(), impostor()).unwrap();
+        assert!(!is_psk(&cipher), "{cipher}");
+    }
+    /// The verify setting alone must hold if somebody widens the cipher list.
+    #[test]
+    fn impostor_is_rejected_even_with_a_wide_cipher_list() {
+        let cfg = Config {
+            cipher_list: "DEFAULT:@SECLEVEL=0".into(),
+            ..config()
+        };
+        let client = context(&cfg, Role::Client).unwrap();
+        assert_eq!(handshake(client, impostor()), None);
+    }
+    #[test]
+    fn camera_with_the_password_is_accepted() {
+        let client = context(&config(), Role::Client).unwrap();
+        let server = context(&config(), Role::Device).unwrap();
+        let cipher = handshake(client, server).unwrap();
+        assert!(is_psk(&cipher), "{cipher}");
+    }
+    #[test]
+    fn only_psk_authentication_counts() {
+        assert!(is_psk("ECDHE-PSK-CHACHA20-POLY1305"));
+        assert!(is_psk("PSK-AES128-CBC-SHA256"));
+        assert!(!is_psk("ECDHE-RSA-AES256-GCM-SHA384"));
+        // RSA-PSK mixes in a certificate. The camera is not known to use it.
+        assert!(!is_psk("RSA-PSK-AES256-GCM-SHA384"));
     }
 }

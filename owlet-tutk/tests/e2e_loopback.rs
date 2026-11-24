@@ -464,3 +464,43 @@ fn run_process_local(mode: &str, security: owlet_tutk::Security, resend: bool) {
     let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
     write_report(&target, mode, &source, &sink, &capture.lock().unwrap());
 }
+
+/// A live session with no video must end, so that the supervisor can reconnect.
+#[test]
+fn stalled_video_ends_the_stream() {
+    use owlet_tutk::{client, device, Config, Security};
+    use std::{
+        net::UdpSocket,
+        sync::{atomic::AtomicBool, Arc},
+        thread,
+    };
+    let bind = || {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(5)))
+            .unwrap();
+        Arc::new(socket)
+    };
+    let camera = bind();
+    // One frame each second is a stall for a client that waits 200 ms.
+    let cfg = Config {
+        uid: UID.into(),
+        password: PASSWORD.into(),
+        dest: camera.local_addr().unwrap(),
+        security: Security::Simple,
+        fps: 1,
+        repeat: true,
+        stall: Duration::from_millis(200),
+        duration: Some(Duration::from_secs(10)),
+        ..Config::default()
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let (camera_cfg, camera_stop) = (cfg.clone(), stop.clone());
+    let handle =
+        thread::spawn(move || device::serve(camera, &camera_cfg, &fixture(), &camera_stop));
+    let error = client::stream(bind(), &cfg, &mut Vec::new()).unwrap_err();
+    stop.store(true, std::sync::atomic::Ordering::Release);
+    handle.join().unwrap().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(error.to_string().contains("no video"), "{error}");
+}

@@ -2,10 +2,23 @@
 name = "owlet-tutk"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.88"
+license = "AGPL-3.0-only"
+publish = false
+description = "LAN video client for Owlet cameras (hardened fork of simonsickle/owlet-rtsp-bridge)"
 
 [features]
-default = []
+default = ["dtls"]
 dtls = ["dep:openssl"]
 
 [dependencies]
 openssl = { version = "0.10", optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = true
+codegen-units = 1
+# Bounds checks are always on. This also catches integer overflow in packet arithmetic.
+overflow-checks = true
