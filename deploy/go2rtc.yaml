@@ -1,0 +1,16 @@
+# go2rtc replaces ${NAME} from the environment. Only RTSP is on: no web UI, no API.
+app:
+  modules: [rtsp, exec]
+api:
+  listen: ""
+webrtc:
+  listen: ""
+rtsp:
+  listen: ":8554"
+  username: frigate
+  password: ${RTSP_PASSWORD}
+streams:
+  # Camera secrets reach owlet-tutk through its environment, not this command line.
+  nursery: exec:owlet-tutk stream --ip ${OWLET_CAMERA_IP} --port scan --port-cache /state/port --resend --out -
+log:
+  level: info

@@ -1,0 +1,22 @@
+services:
+  owlet-frigate:
+    build: .
+    image: owlet-frigate:local
+    container_name: owlet-frigate
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    # No "ports:" on purpose. Only containers on owlet-net reach the video.
+    networks: [owlet-net]
+    volumes: [state:/state]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
+volumes:
+  state:
+networks:
+  # Create once: docker network create owlet-net
+  owlet-net:
+    external: true
