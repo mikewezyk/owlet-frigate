@@ -1,6 +1,6 @@
 # Connect Frigate
 
-Back up `config.yml` first. Nothing here has been applied to a running Frigate yet.
+Back up `config.yml` first. Applied 2026-11-24 to Frigate 0.18.3, with the privacy settings below.
 
 ## 1. Join the network
 
@@ -46,6 +46,15 @@ cameras:
       enabled: false
     snapshots:
       enabled: false
+    objects:
+      track: []          # no tracked objects, thumbnails, or person alerts
+    lpr:
+      enabled: false
+    review:
+      alerts:
+        enabled: false
+      detections:
+        enabled: false
 ```
 
 Validate, then restart:
@@ -63,7 +72,8 @@ reach it. Docker's published ports bypass most host firewalls, so use the `DOCKE
 allow only Home Assistant (<home-assistant-ip>).
 
 Frigate also restreams every camera on port 8554, with no password unless you set one in its
-go2rtc `rtsp:` section. Do not publish 8554 unless something needs it.
+go2rtc `rtsp:` section. Home Assistant's live view normally uses 8554, so limit it to Home Assistant the same way.
+Bind ports as `0.0.0.0:PORT` so Docker does not also publish them on IPv6.
 
 ## 5. Awake or asleep
 

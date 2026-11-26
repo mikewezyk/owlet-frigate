@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Crib labeler</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root{color-scheme:dark;--bg:#111;--fg:#eee;--dim:#999;--acc:#6cf}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px system-ui,sans-serif;display:flex;flex-direction:column;height:100vh}
+  header{display:flex;gap:18px;align-items:center;padding:8px 14px;background:#1b1b1b;flex-wrap:wrap}
+  header b{color:var(--acc)} .dim{color:var(--dim)}
+  #stage{flex:1;position:relative;display:flex;justify-content:center;align-items:center;min-height:0;overflow:hidden}
+  #wrap{position:relative;max-width:100%;max-height:100%;line-height:0}
+  #img{max-width:100vw;max-height:calc(100vh - 120px);display:block;user-select:none;-webkit-user-drag:none}
+  #box{position:absolute;border:2px dashed #ff0;pointer-events:none;box-shadow:0 0 0 9999px rgba(0,0,0,.35)}
+  #flash{position:absolute;top:14px;left:50%;transform:translateX(-50%);padding:6px 18px;font-size:22px;font-weight:600;border-radius:6px;background:#000a;opacity:0;transition:opacity .25s}
+  footer{padding:8px 14px;background:#1b1b1b;display:flex;gap:16px;flex-wrap:wrap}
+  kbd{background:#333;border-radius:4px;padding:1px 7px;margin-right:4px;font-family:ui-monospace,monospace}
+  #msg{padding:60px;text-align:center;font-size:20px}
+</style></head><body>
+<header>
+  <span>Left to label: <b id="rem">-</b> of <span id="tot">-</span></span>
+  <span>Pending: <span id="cnt" class="dim"></span></span>
+  <span>Already in Frigate: <span id="app" class="dim"></span></span>
+  <span>Crop: <span id="crop" class="dim">drag on the image to mark the crib</span></span>
+</header>
+<div id="stage"><div id="wrap"><img id="img" alt=""><div id="box" hidden></div></div><div id="flash"></div></div>
+<footer>
+  <span><kbd>1</kbd>empty (no baby in crib)</span><span><kbd>2</kbd>asleep</span><span><kbd>3</kbd>awake</span>
+  <span><kbd>4</kbd>discard (bad image / adult handling baby)</span><span><kbd>S</kbd>skip</span>
+  <span><kbd>Backspace</kbd>undo</span><span><kbd>A</kbd>apply to Frigate</span>
+  <span><kbd>Z</kbd>zoom</span>
+</footer>
+<script>
+const NAMES={1:'empty',2:'asleep',3:'awake',4:'discard'};
+let queue=[],history=[],cur=null,zoom=false,crop=null,busy=false;
+const $=id=>document.getElementById(id);
+const img=$('img'),box=$('box');
+async function api(path,body){const r=await fetch(path,body?{method:'POST',body:JSON.stringify(body)}:{});return r.json()}
+function flash(t){const f=$('flash');f.textContent=t;f.style.opacity=1;clearTimeout(f.t);f.t=setTimeout(()=>f.style.opacity=0,700)}
+async function refresh(){
+  const s=await api('/api/state');
+  $('tot').textContent=s.total;$('rem').textContent=s.remaining;
+  $('cnt').textContent=Object.entries(s.counts).map(([k,v])=>k+' '+v).join(' · ');
+  $('app').textContent=Object.entries(s.applied).map(([k,v])=>k+' '+v).join(' · ')||'none';
+  queue=s.todo.filter(f=>f!==cur&&!history.some(h=>h.file===f&&h.skipped));
+  if(!crop&&s.crop){crop=s.crop;drawBox()}
+  s.todo.forEach(f=>{const i=new Image();i.src='/img/'+f});
+}
+function show(){
+  if(!cur){cur=queue.shift()||null}
+  if(!cur){img.removeAttribute('src');$('wrap').style.display='none';
+    $('stage').insertAdjacentHTML('beforeend','<div id="msg">Nothing left to label. Press A to apply.</div>');return}
+  const m=$('msg');if(m)m.remove();$('wrap').style.display='';
+  img.src='/img/'+cur;img.style.transform=zoom?'scale(2)':'';
+}
+async function decide(label){
+  if(!cur||busy)return;busy=true;
+  history.push({file:cur,label});
+  if(label)await api('/api/label',{file:cur,label});
+  flash(label||'skipped');cur=null;
+  if(queue.length<4)await refresh();
+  show();busy=false;if(label)refresh();
+}
+async function undo(){
+  const h=history.pop();if(!h)return;
+  if(h.label)await api('/api/label',{file:h.file,label:null});
+  if(cur)queue.unshift(cur);cur=h.file;flash('undone');show();refresh();
+}
+async function applyAll(){
+  if(!confirm('Send all pending labels to Frigate now?'))return;
+  const r=await api('/api/apply',{});
+  alert('Applied '+r.applied+(r.failed.length?'\nFailed:\n'+r.failed.join('\n'):''));history=[];await refresh();
+}
+document.addEventListener('keydown',e=>{
+  if(e.metaKey||e.ctrlKey)return;
+  if(NAMES[e.key])decide(NAMES[e.key]);
+  else if(e.key==='s'||e.key==='S')decide(null);
+  else if(e.key==='Backspace'){e.preventDefault();undo()}
+  else if(e.key==='a'||e.key==='A')applyAll();
+  else if(e.key==='z'||e.key==='Z'){zoom=!zoom;img.style.transform=zoom?'scale(2)':'';img.style.transformOrigin=crop?`${(crop.l+crop.r)*50}% ${(crop.t+crop.b)*50}%`:'50% 50%'}
+});
+// drag a rectangle to mark the crib edges; shown on every image
+let drag=null;
+function pt(e){const r=img.getBoundingClientRect();return{x:Math.min(1,Math.max(0,(e.clientX-r.left)/r.width)),y:Math.min(1,Math.max(0,(e.clientY-r.top)/r.height))}}
+img.addEventListener('mousedown',e=>{e.preventDefault();drag=pt(e)});
+window.addEventListener('mousemove',e=>{if(!drag)return;const p=pt(e);
+  crop={l:Math.min(drag.x,p.x),r:Math.max(drag.x,p.x),t:Math.min(drag.y,p.y),b:Math.max(drag.y,p.y)};drawBox()});
+window.addEventListener('mouseup',()=>{if(drag&&crop)api('/api/crop',crop);drag=null});
+function drawBox(){
+  if(!crop){box.hidden=true;return}
+  box.hidden=false;box.style.left=crop.l*100+'%';box.style.top=crop.t*100+'%';
+  box.style.width=(crop.r-crop.l)*100+'%';box.style.height=(crop.b-crop.t)*100+'%';
+  const p=v=>(v*100).toFixed(1)+'%';
+  $('crop').textContent=`left ${p(crop.l)}  right ${p(crop.r)}  top ${p(crop.t)}  bottom ${p(crop.b)}`;
+}
+refresh().then(show);
+</script></body></html>

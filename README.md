@@ -6,8 +6,8 @@ Feeds an Owlet Cam into Frigate over the LAN. No portal, and no ports open to th
 Owlet cam → owlet-tutk (Rust, DTLS) → go2rtc (RTSP) → Frigate → Home Assistant
 ```
 
-**Status:** tested against the included fake camera. Not yet tested on a real camera, and the
-container image has not been built yet. Upstream tested one model: E96LM72, firmware 4.2.146.
+**Status:** working on a real camera (firmware 4.14.2) and feeding Frigate. Upstream tested one
+model: E96LM72, firmware 4.2.146. See [docs/OVERVIEW.md](docs/OVERVIEW.md) for what this is and how it fits with Frigate.
 Video only. This is a convenience feed, not a medical or safety monitor.
 
 ## Set up
