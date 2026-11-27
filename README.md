@@ -40,8 +40,6 @@ The port is remembered after that.
 
 `git diff 626c943 -- owlet-tutk` shows every change to the imported code.
 
-**Keep this repository private until the author has had a chance to fix the DTLS issue.**
-
 ## Develop
 
 ```sh
