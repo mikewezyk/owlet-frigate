@@ -38,7 +38,7 @@ The port is remembered after that.
 | `--stall` | A frozen picture ends the stream, so it reconnects |
 | `unsafe` forbidden; overflow checks in release builds | The parsers read untrusted packets |
 
-`git diff 12551af -- owlet-tutk` shows every change to the imported code.
+`git diff 626c943 -- owlet-tutk` shows every change to the imported code.
 
 **Keep this repository private until the author has had a chance to fix the DTLS issue.**
 

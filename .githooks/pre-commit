@@ -1,0 +1,23 @@
+#!/bin/sh
+# Blocks commits that would publish local secrets or private network details.
+# Enable once per clone:  git config core.hooksPath .githooks
+fail=0
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+for f in $staged; do
+  case "$f" in
+    .env|.env.*|*/.env|*/.env.*)
+      [ "$f" = ".env.example" ] || { echo "BLOCKED: $f is a secrets file"; fail=1; } ;;
+    CLAUDE.md|*.pem|*.key) echo "BLOCKED: $f is local-only"; fail=1 ;;
+  esac
+done
+
+added=$(git diff --cached -U0 --no-color -- $staged ':!.githooks' ':!owlet-tutk/spec' ':!owlet-tutk/re' 2>/dev/null | grep '^+[^+]')
+# Secret-looking assignments (placeholders and tests excepted)
+echo "$added" | grep -iE "(password|authkey|secret|token|api[_-]?key)[A-Za-z_]*['\"]?[ ]*[:=][ ]*['\"][A-Za-z0-9/+_-]{8,}['\"]" \
+  | grep -viE "from the script|Abcd1234|fixture|test-camera|wrong-password|example" \
+  && { echo "BLOCKED: possible secret above"; fail=1; }
+# Private LAN addresses and tokens
+echo "$added" | grep -E "192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|gh[pous]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}" \
+  && { echo "BLOCKED: private IP or token above (use a placeholder)"; fail=1; }
+exit $fail

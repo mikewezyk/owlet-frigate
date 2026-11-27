@@ -31,7 +31,7 @@ Owlet cam ──LAN, DTLS──> owlet-tutk ──H.264──> go2rtc ──RTSP
 | `--stall` | A frozen picture ends the stream so it reconnects |
 | `unsafe` forbidden; overflow checks in release builds | The packet parsers read untrusted input |
 
-`git diff 12551af -- owlet-tutk` shows every change to the imported code.
+`git diff 626c943 -- owlet-tutk` shows every change to the imported code.
 
 ## How it works with Frigate
 
